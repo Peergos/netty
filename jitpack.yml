@@ -1,0 +1,5 @@
+jdk:
+  - openjdk21
+install:
+  # Only the kwik based QUIC module; the other Netty modules come from Maven Central
+  - ./mvnw -B -pl codec-classes-quic -DskipTests -Dcheckstyle.skip -Danimal.sniffer.skip -Djapicmp.skip -Drevapi.skip -Denforcer.skip -Dforbiddenapis.skip install
