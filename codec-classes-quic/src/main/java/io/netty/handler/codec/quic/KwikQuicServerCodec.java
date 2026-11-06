@@ -18,11 +18,11 @@ package io.netty.handler.codec.quic;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.handler.ssl.ClientAuth;
 import io.netty.util.AttributeKey;
-import io.netty.util.concurrent.GlobalEventExecutor;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.jetbrains.annotations.Nullable;
@@ -182,12 +182,19 @@ final class KwikQuicServerCodec extends ChannelDuplexHandler {
         ctx.fireChannelInactive();
     }
 
+    @Override
+    public void close(ChannelHandlerContext ctx, ChannelPromise promise) {
+        // First, so the connections' CONNECTION_CLOSE frames still go out
+        closeServer();
+        ctx.close(promise);
+    }
+
     private void closeServer() {
         ServerConnector connector = server;
         if (connector != null) {
             server = null;
-            // close() waits for the connections to close, which run on the event loop, so it must not run there
-            GlobalEventExecutor.INSTANCE.execute(connector::close);
+            // On the event loop, which runs the connections; their closing periods end without anyone waiting
+            connector.closeWithoutWaiting();
         }
     }
 

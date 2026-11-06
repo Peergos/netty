@@ -466,6 +466,7 @@ final class KwikQuicStreamChannel extends AbstractChannel implements QuicStreamC
                 ByteBuf buffer = allocHandle.allocate(config.getAllocator());
                 int read;
                 try {
+                    allocHandle.attemptedBytesRead(buffer.writableBytes());
                     ByteBuffer target = buffer.nioBuffer(buffer.writerIndex(), buffer.writableBytes());
                     read = stream.read(target);
                 }
@@ -502,7 +503,11 @@ final class KwikQuicStreamChannel extends AbstractChannel implements QuicStreamC
         }
         finally {
             inRead = false;
-            allocHandle.readComplete();
+            // Only for reads that found something: an empty one would shrink the allocator's next guess, which quiche
+            // (that only reads when there is data) does not do
+            if (readSomething) {
+                allocHandle.readComplete();
+            }
             if (readSomething || inputShutdown) {
                 pipeline.fireChannelReadComplete();
             }
