@@ -17,8 +17,11 @@ package io.netty.handler.codec.quic;
 
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.socket.DatagramPacket;
 import org.jetbrains.annotations.Nullable;
+
+import java.net.SocketAddress;
 import tech.kwik.core.socket.DatagramEndpoint;
 
 /**
@@ -56,6 +59,30 @@ final class KwikQuicClientCodec extends ChannelDuplexHandler {
             throw new IllegalStateException("codec not added to a pipeline");
         }
         return e;
+    }
+
+    @Override
+    public void connect(ChannelHandlerContext ctx, SocketAddress remoteAddress, SocketAddress localAddress,
+                        ChannelPromise promise) {
+        if (remoteAddress instanceof KwikQuicChannelAddress) {
+            KwikQuicChannel channel = ((KwikQuicChannelAddress) remoteAddress).channel;
+            QuicConnectionAddress requested = channel.requestedConnectionAddress;
+            if (requested != null && requested != QuicConnectionAddress.EPHEMERAL && localConnIdLength > 0
+                    && requested.id().remaining() > localConnIdLength) {
+                promise.setFailure(new IllegalArgumentException("connection id longer than " + localConnIdLength));
+                return;
+            }
+            try {
+                channel.connectClient(this);
+                promise.setSuccess();
+            }
+            catch (Exception e) {
+                promise.setFailure(e);
+            }
+        }
+        else {
+            ctx.connect(remoteAddress, localAddress, promise);
+        }
     }
 
     @Override

@@ -58,6 +58,11 @@ final class KwikQuicStreamChannel extends AbstractChannel implements QuicStreamC
     private boolean active = true;
     private boolean inputShutdown;
     private boolean outputShutdown;
+    private boolean inputShutdownHandled;
+    // Bytes written to the channel but not yet to the kwik stream
+    private long pendingBytes;
+    private boolean writable = true;
+    @Nullable private volatile QuicStreamPriority priority;
     private boolean readPending;
     private boolean inRead;
     // Set when the remote reset the stream or stopped reading, failing what is written later
@@ -70,6 +75,10 @@ final class KwikQuicStreamChannel extends AbstractChannel implements QuicStreamC
         this.localCreated = localCreated;
         this.address = new QuicStreamAddress(stream.getStreamId());
         this.config = new KwikQuicStreamChannelConfig(this);
+        // Local unidirectional streams will never receive data
+        if (localCreated && stream.isUnidirectional()) {
+            inputShutdown = true;
+        }
         stream.setStreamListener(new StreamListener() {
             @Override
             public void readable(QuicStream s) {
@@ -121,13 +130,17 @@ final class KwikQuicStreamChannel extends AbstractChannel implements QuicStreamC
     @Override
     @Nullable
     public QuicStreamPriority priority() {
-        return null;
+        return priority;
     }
 
     @Override
     public ChannelFuture updatePriority(QuicStreamPriority priority, ChannelPromise promise) {
-        // kwik does not prioritise streams
-        return promise.setSuccess();
+        // Only kept: kwik does not prioritise streams
+        runOnLoop(() -> {
+            this.priority = priority;
+            promise.setSuccess();
+        });
+        return promise;
     }
 
     @Override
@@ -295,6 +308,7 @@ final class KwikQuicStreamChannel extends AbstractChannel implements QuicStreamC
             return;
         }
         active = false;
+        pendingBytes = 0;
         boolean writable = !stream.isUnidirectional() || localCreated;
         boolean readable = !stream.isUnidirectional() || !localCreated;
         // As quiche's channel does: end the stream gracefully where it was not ended already
@@ -325,16 +339,27 @@ final class KwikQuicStreamChannel extends AbstractChannel implements QuicStreamC
 
     @Override
     protected void doWrite(ChannelOutboundBuffer in) throws Exception {
+        try {
+            write(in);
+        }
+        finally {
+            updateWritability();
+        }
+    }
+
+    private void write(ChannelOutboundBuffer in) {
         for (;;) {
             Object msg = in.current();
             if (msg == null) {
                 return;
             }
             if (writeFailure != null) {
+                pendingBytes -= readableBytes(msg);
                 in.remove(writeFailure);
                 continue;
             }
             if (outputShutdown) {
+                pendingBytes -= readableBytes(msg);
                 in.remove(new ChannelOutputShutdownException(FIN_SENT_MESSAGE));
                 continue;
             }
@@ -352,6 +377,7 @@ final class KwikQuicStreamChannel extends AbstractChannel implements QuicStreamC
             try {
                 ByteBuffer source = data.nioBuffer();
                 int written = stream.write(source, fin);
+                pendingBytes -= written;
                 data.skipBytes(written);
                 in.progress(written);
                 if (written < readable) {
@@ -364,6 +390,7 @@ final class KwikQuicStreamChannel extends AbstractChannel implements QuicStreamC
                 in.remove();
             }
             catch (IOException e) {
+                pendingBytes -= data.readableBytes();
                 Throwable failure = toChannelException(e);
                 if (e instanceof StreamStoppedException) {
                     writeFailure = failure;
@@ -378,12 +405,51 @@ final class KwikQuicStreamChannel extends AbstractChannel implements QuicStreamC
     }
 
     @Override
-    protected Object filterOutboundMessage(Object msg) {
+    protected Object filterOutboundMessage(Object msg) throws Exception {
+        if (outputShutdown) {
+            ReferenceCountUtil.release(msg);
+            throw new ChannelOutputShutdownException(FIN_SENT_MESSAGE);
+        }
+        if (!localCreated && stream.isUnidirectional()) {
+            ReferenceCountUtil.release(msg);
+            throw new UnsupportedOperationException(
+                    "Writes on non-local created streams that are unidirectional are not supported");
+        }
         if (msg instanceof ByteBuf || msg instanceof QuicStreamFrame) {
+            pendingBytes += readableBytes(msg);
+            updateWritability();
             return msg;
         }
         ReferenceCountUtil.release(msg);
         throw new UnsupportedOperationException("unsupported message type: " + msg.getClass().getName());
+    }
+
+    private static int readableBytes(Object msg) {
+        return msg instanceof ByteBuf? ((ByteBuf) msg).readableBytes(): ((QuicStreamFrame) msg).content().readableBytes();
+    }
+
+    /**
+     * As with quiche: the space the stream has for data (here kwik's send buffer), less what is waiting to go into it.
+     */
+    @Override
+    public long bytesBeforeUnwritable() {
+        if (!isOpen() || outputShutdown || !localCreated && stream.isUnidirectional()) {
+            return 0;
+        }
+        return Math.max(0, stream.writeCapacity() - pendingBytes);
+    }
+
+    @Override
+    public boolean isWritable() {
+        return bytesBeforeUnwritable() > 0;
+    }
+
+    private void updateWritability() {
+        boolean now = isWritable();
+        if (now != writable) {
+            writable = now;
+            pipeline().fireChannelWritabilityChanged();
+        }
     }
 
     private void readFromStream() {
@@ -440,7 +506,8 @@ final class KwikQuicStreamChannel extends AbstractChannel implements QuicStreamC
             if (readSomething || inputShutdown) {
                 pipeline.fireChannelReadComplete();
             }
-            if (inputShutdown && active) {
+            if (inputShutdown && active && !inputShutdownHandled) {
+                inputShutdownHandled = true;
                 if (config.isAllowHalfClosure()) {
                     pipeline.fireUserEventTriggered(ChannelInputShutdownReadComplete.INSTANCE);
                     closeIfDone();
@@ -501,6 +568,7 @@ final class KwikQuicStreamChannel extends AbstractChannel implements QuicStreamC
     private final class StreamUnsafe extends AbstractUnsafe {
         void resumeWrites() {
             flush0();
+            updateWritability();
         }
 
         @Override

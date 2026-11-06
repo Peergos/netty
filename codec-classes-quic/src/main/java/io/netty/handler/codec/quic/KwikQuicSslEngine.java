@@ -19,6 +19,7 @@ import io.netty.util.internal.EmptyArrays;
 import org.jetbrains.annotations.Nullable;
 
 import javax.net.ssl.SSLEngineResult;
+import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSessionContext;
@@ -35,6 +36,7 @@ import java.util.List;
  */
 final class KwikQuicSslEngine extends QuicSslEngine {
 
+    private final KwikQuicSslContext context;
     private final boolean client;
     @Nullable private final String peerHost;
     private final int peerPort;
@@ -45,10 +47,15 @@ final class KwikQuicSslEngine extends QuicSslEngine {
     private final long creationTime = System.currentTimeMillis();
     private final SSLSession session = new KwikSession();
 
-    KwikQuicSslEngine(boolean client, @Nullable String peerHost, int peerPort) {
+    KwikQuicSslEngine(KwikQuicSslContext context, boolean client, @Nullable String peerHost, int peerPort) {
+        this.context = context;
         this.client = client;
         this.peerHost = peerHost;
         this.peerPort = peerPort;
+    }
+
+    KwikQuicSslContext context() {
+        return context;
     }
 
     /**
@@ -83,6 +90,14 @@ final class KwikQuicSslEngine extends QuicSslEngine {
 
     @Override
     @Nullable
+    public SSLParameters getSSLParameters() {
+        SSLParameters parameters = super.getSSLParameters();
+        // Read by X509ExtendedTrustManagers to check the host name
+        parameters.setEndpointIdentificationAlgorithm(context.endpointIdentificationAlgorithm());
+        return parameters;
+    }
+
+    @Override
     public SSLSession getHandshakeSession() {
         return handshakeDone? null: session;
     }

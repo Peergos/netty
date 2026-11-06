@@ -17,9 +17,11 @@ package io.netty.handler.codec.quic;
 
 import org.jetbrains.annotations.Nullable;
 
+import java.util.function.Function;
+
 /**
  * The settings of a {@link QuicCodecBuilder}, for the kwik based codecs. Settings that kwik has no equivalent for
- * (grease, hystart, pmtu discovery, the congestion control algorithm and its initial window, queue lengths) are accepted
+ * (grease, hystart, pmtu discovery, the congestion control algorithm and its initial window, the datagram send queue) are accepted
  * by the builder but not used.
  */
 final class KwikConfig {
@@ -40,6 +42,9 @@ final class KwikConfig {
     @Nullable final Long activeConnectionIdLimit;
     @Nullable final byte[] statelessResetToken;
     final KwikQuicSslContext sslContext;
+    final Function<QuicChannel, ? extends QuicSslEngine> sslEngineProvider;
+    // 0 when datagrams (RFC 9221) are disabled
+    final int datagramRecvQueueLen;
 
     KwikConfig(int version, @Nullable Long maxIdleTimeout, @Nullable Long maxSendUdpPayloadSize,
                @Nullable Long maxRecvUdpPayloadSize, @Nullable Long initialMaxData,
@@ -47,7 +52,8 @@ final class KwikConfig {
                @Nullable Long initialMaxStreamDataUni, @Nullable Long initialMaxStreamsBidi,
                @Nullable Long initialMaxStreamsUni, @Nullable Long ackDelayExponent, @Nullable Long maxAckDelay,
                @Nullable Boolean disableActiveMigration, @Nullable Long activeConnectionIdLimit,
-               @Nullable byte[] statelessResetToken, KwikQuicSslContext sslContext) {
+               @Nullable byte[] statelessResetToken, KwikQuicSslContext sslContext,
+               Function<QuicChannel, ? extends QuicSslEngine> sslEngineProvider, int datagramRecvQueueLen) {
         this.version = version;
         this.maxIdleTimeout = maxIdleTimeout;
         this.maxSendUdpPayloadSize = maxSendUdpPayloadSize;
@@ -64,5 +70,7 @@ final class KwikConfig {
         this.activeConnectionIdLimit = activeConnectionIdLimit;
         this.statelessResetToken = statelessResetToken;
         this.sslContext = sslContext;
+        this.sslEngineProvider = sslEngineProvider;
+        this.datagramRecvQueueLen = datagramRecvQueueLen;
     }
 }

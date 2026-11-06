@@ -226,6 +226,11 @@ final class KwikQuicServerCodec extends ChannelDuplexHandler {
         }
 
         @Override
+        public boolean enableDatagramExtension() {
+            return config.datagramRecvQueueLen > 0;
+        }
+
+        @Override
         public int maxConcurrentPeerInitiatedBidirectionalStreams() {
             return maxBidi;
         }

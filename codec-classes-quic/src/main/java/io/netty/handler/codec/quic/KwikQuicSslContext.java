@@ -54,8 +54,8 @@ final class KwikQuicSslContext extends QuicSslContext {
     private final ClientAuth clientAuth;
     private final List<String> applicationProtocols;
     @Nullable private final String endpointIdentificationAlgorithm;
-    private final long sessionCacheSize;
-    private final long sessionTimeout;
+    private volatile long sessionCacheSize;
+    private volatile long sessionTimeout;
 
     KwikQuicSslContext(boolean server, @Nullable KeyManagerFactory keyManagerFactory,
                        @Nullable TrustManagerFactory trustManagerFactory, ClientAuth clientAuth,
@@ -141,12 +141,12 @@ final class KwikQuicSslContext extends QuicSslContext {
 
     @Override
     public QuicSslEngine newEngine(ByteBufAllocator alloc) {
-        return new KwikQuicSslEngine(isClient(), null, -1);
+        return new KwikQuicSslEngine(this, isClient(), null, -1);
     }
 
     @Override
     public QuicSslEngine newEngine(ByteBufAllocator alloc, String peerHost, int peerPort) {
-        return new KwikQuicSslEngine(isClient(), peerHost, peerPort);
+        return new KwikQuicSslEngine(this, isClient(), peerHost, peerPort);
     }
 
     @Override
@@ -170,6 +170,7 @@ final class KwikQuicSslContext extends QuicSslContext {
 
             @Override
             public void setSessionTimeout(int seconds) {
+                sessionTimeout = seconds;
             }
 
             @Override
@@ -179,6 +180,7 @@ final class KwikQuicSslContext extends QuicSslContext {
 
             @Override
             public void setSessionCacheSize(int size) {
+                sessionCacheSize = size;
             }
 
             @Override

@@ -28,6 +28,7 @@ import io.netty.channel.ChannelPromise;
 import io.netty.channel.ConnectTimeoutException;
 import io.netty.channel.DefaultChannelPipeline;
 import io.netty.channel.EventLoop;
+import io.netty.channel.RecvByteBufAllocator;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
@@ -37,6 +38,7 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.jetbrains.annotations.Nullable;
 import tech.kwik.core.ConnectionListener;
 import tech.kwik.core.ConnectionTerminatedEvent;
+import tech.kwik.core.PeerClosedConnectionException;
 import tech.kwik.core.QuicClientConnection;
 import tech.kwik.core.QuicConnection;
 import tech.kwik.core.QuicStream;
@@ -44,14 +46,18 @@ import tech.kwik.core.log.NullLogger;
 
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.X509ExtendedKeyManager;
+import javax.net.ssl.X509ExtendedTrustManager;
 import javax.net.ssl.X509TrustManager;
 import java.net.InetSocketAddress;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
 import java.net.SocketAddress;
 import java.nio.channels.AlreadyConnectedException;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.ConnectionPendingException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -83,8 +89,13 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
     @Nullable private String applicationProtocol;
     private State state = State.OPEN;
     @Nullable private ChannelPromise connectPromise;
+    // kwik chooses the connection ids; a requested one is only checked
+    @Nullable QuicConnectionAddress requestedConnectionAddress;
     private boolean timedOut;
     private boolean closeEventFired;
+    private final ArrayDeque<byte[]> datagrams = new ArrayDeque<>();
+    private boolean readPending;
+    private boolean inRead;
 
     private KwikQuicChannel(Channel parent, boolean server, KwikConfig quicConfig,
                             @Nullable InetSocketAddress localSocketAddress, InetSocketAddress remoteSocketAddress,
@@ -94,8 +105,9 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
         this.server = server;
         this.quicConfig = quicConfig;
         this.config = new KwikQuicChannelConfig(this);
-        this.sslEngine = (KwikQuicSslEngine) quicConfig.sslContext.newEngine(parent.alloc(),
-                remoteSocketAddress.getHostString(), remoteSocketAddress.getPort());
+        // As with quiche, the builder's provider gives each channel its engine (whose peer host, if any, the trust
+        // manager checks)
+        this.sslEngine = (KwikQuicSslEngine) quicConfig.sslEngineProvider.apply(this);
         this.localSocketAddress = localSocketAddress;
         this.remoteSocketAddress = remoteSocketAddress;
         this.streamHandler = streamHandler;
@@ -114,7 +126,6 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
         KwikQuicChannel channel = new KwikQuicChannel(parent, true, quicConfig, (InetSocketAddress) parent.localAddress(),
                 remote, streamHandler, streamOptions, streamAttrs);
         channel.attach(connection, applicationProtocol);
-        channel.state = State.ACTIVE;
         return channel;
     }
 
@@ -131,9 +142,18 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
         connection.setConnectionListener(new ConnectionListener() {
             @Override
             public void disconnected(ConnectionTerminatedEvent event) {
-                runOnLoop(() -> connectionTerminated(event));
+                // A task, so datagrams kwik handed over before the close are delivered first
+                eventLoopExecutor().execute(() -> connectionTerminated(event));
             }
         });
+        if (quicConfig.datagramRecvQueueLen > 0) {
+            connection.setDatagramHandler(this::datagramReceived, eventLoopExecutor());
+        }
+        connection.setStreamCreditListener(() -> runOnLoop(() -> {
+            if (state == State.ACTIVE) {
+                pipeline().fireUserEventTriggered(QuicStreamLimitChangedEvent.INSTANCE);
+            }
+        }));
         if (!server) {
             connection.setPeerInitiatedStreamCallback(stream -> runOnLoop(() -> peerInitiatedStream(stream)));
         }
@@ -143,8 +163,66 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
      * Called (on the event loop) once the handshake has finished, for a channel registered in an active state.
      */
     void handshakeCompleted() {
+        if (state != State.OPEN) {
+            return;
+        }
+        state = State.ACTIVE;
         sslEngine.handshakeFinished(connection != null? connection.getPeerCertificateChain(): null, applicationProtocol);
+        fireDatagramExtensionEvent();
+        pipeline().fireChannelActive();
         pipeline().fireUserEventTriggered(SslHandshakeCompletionEvent.SUCCESS);
+        pipeline().fireUserEventTriggered(QuicStreamLimitChangedEvent.INSTANCE);
+    }
+
+    private void fireDatagramExtensionEvent() {
+        QuicConnection conn = connection;
+        if (conn != null && conn.isDatagramExtensionEnabled()) {
+            pipeline().fireUserEventTriggered(new QuicDatagramExtensionEvent(conn.maxDatagramDataSize()));
+        }
+    }
+
+    private java.util.concurrent.ExecutorService eventLoopExecutor() {
+        Channel p = parent();
+        return p != null? p.eventLoop(): eventLoop();
+    }
+
+    private void datagramReceived(byte[] data) {
+        if (state == State.CLOSED) {
+            return;
+        }
+        if (datagrams.size() >= quicConfig.datagramRecvQueueLen) {
+            datagrams.poll();
+        }
+        datagrams.add(data);
+        if (state == State.ACTIVE && (readPending || config().isAutoRead())) {
+            readDatagrams();
+        }
+    }
+
+    private void readDatagrams() {
+        if (inRead || datagrams.isEmpty()) {
+            return;
+        }
+        inRead = true;
+        try {
+            RecvByteBufAllocator.Handle allocHandle = unsafe().recvBufAllocHandle();
+            allocHandle.reset(config());
+            do {
+                byte[] data = datagrams.poll();
+                if (data == null) {
+                    break;
+                }
+                readPending = false;
+                allocHandle.lastBytesRead(data.length);
+                allocHandle.incMessagesRead(1);
+                pipeline().fireChannelRead(alloc().directBuffer(data.length).writeBytes(data));
+            } while (allocHandle.continueReading());
+            allocHandle.readComplete();
+            pipeline().fireChannelReadComplete();
+        }
+        finally {
+            inRead = false;
+        }
     }
 
     void peerInitiatedStream(QuicStream stream) {
@@ -164,17 +242,23 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
     }
 
     private void connectionTerminated(ConnectionTerminatedEvent event) {
-        timedOut = event.closeReason() == ConnectionTerminatedEvent.CloseReason.IdleTimeout;
+        // kwik calls an idle timeout with data still unacknowledged a lost connection; quiche counts both as timed out
+        timedOut = event.closeReason() == ConnectionTerminatedEvent.CloseReason.IdleTimeout
+                || event.closeReason() == ConnectionTerminatedEvent.CloseReason.ConnectionLost;
+        QuicConnectionCloseEvent closeEvent = null;
         if (!closeEventFired) {
             closeEventFired = true;
             Long code = event.hasApplicationError()? event.applicationErrorCode(): event.transportErrorCode();
-            pipeline().fireUserEventTriggered(new QuicConnectionCloseEvent(event.hasApplicationError(),
-                    code == null? 0: (int) (long) code, new byte[0]));
+            closeEvent = new QuicConnectionCloseEvent(event.hasApplicationError(), code == null? 0: (int) (long) code,
+                    new byte[0]);
+            pipeline().fireUserEventTriggered(closeEvent);
         }
         ChannelPromise promise = connectPromise;
         if (promise != null) {
             connectPromise = null;
-            promise.tryFailure(new ClosedChannelException());
+            QuicClosedChannelException cause = new QuicClosedChannelException(closeEvent);
+            pipeline().fireUserEventTriggered(new SslHandshakeCompletionEvent(cause));
+            promise.tryFailure(cause);
         }
         if (isOpen()) {
             unsafe().close(voidPromise());
@@ -211,10 +295,14 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
             }
             QuicStream stream;
             try {
-                stream = connection.createStream(type == QuicStreamType.BIDIRECTIONAL);
+                stream = connection.tryCreateStream(type == QuicStreamType.BIDIRECTIONAL);
             }
             catch (Exception e) {
                 promise.setFailure(e);
+                return;
+            }
+            if (stream == null) {
+                promise.setFailure(new QuicException("STREAM_LIMIT", QuicTransportError.STREAM_LIMIT_ERROR));
                 return;
             }
             KwikQuicStreamChannel streamChannel = new KwikQuicStreamChannel(this, stream, true);
@@ -261,8 +349,8 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
 
     @Override
     public long peerAllowedStreams(QuicStreamType type) {
-        // kwik blocks stream creation until the peer allows more, rather than exposing the count
-        return state == State.ACTIVE? Long.MAX_VALUE: 0;
+        QuicConnection conn = connection;
+        return conn == null || state != State.ACTIVE? 0: conn.availableStreams(type == QuicStreamType.BIDIRECTIONAL);
     }
 
     @Override
@@ -278,12 +366,14 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
 
     @Override
     public QuicConnectionAddress localAddress() {
-        return QuicConnectionAddress.EPHEMERAL;
+        QuicConnection conn = connection;
+        return conn == null? QuicConnectionAddress.EPHEMERAL: new QuicConnectionAddress(conn.localConnectionId());
     }
 
     @Override
     public QuicConnectionAddress remoteAddress() {
-        return QuicConnectionAddress.EPHEMERAL;
+        QuicConnection conn = connection;
+        return conn == null? QuicConnectionAddress.EPHEMERAL: new QuicConnectionAddress(conn.peerConnectionId());
     }
 
     @Override
@@ -395,18 +485,43 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
 
     @Override
     protected void doBeginRead() {
-        // Streams are delivered as they arrive
+        // Streams are delivered as they arrive; reads only apply to datagrams
+        readPending = true;
+        readDatagrams();
     }
 
     @Override
     protected void doWrite(ChannelOutboundBuffer in) {
-        // Datagrams (RFC 9221) are not supported
         for (;;) {
-            if (in.current() == null) {
+            Object msg = in.current();
+            if (msg == null) {
                 return;
             }
-            in.remove(new UnsupportedOperationException("QUIC datagrams are not supported"));
+            QuicConnection conn = connection;
+            if (conn == null || !conn.canSendDatagram()) {
+                in.remove(new UnsupportedOperationException("QUIC datagrams are not enabled"));
+                continue;
+            }
+            ByteBuf buf = (ByteBuf) msg;
+            byte[] data = new byte[buf.readableBytes()];
+            buf.getBytes(buf.readerIndex(), data);
+            try {
+                conn.sendDatagram(data);
+                in.remove();
+            }
+            catch (RuntimeException e) {
+                in.remove(e);
+            }
         }
+    }
+
+    @Override
+    protected Object filterOutboundMessage(Object msg) {
+        if (msg instanceof ByteBuf) {
+            return msg;
+        }
+        io.netty.util.ReferenceCountUtil.release(msg);
+        throw new UnsupportedOperationException("unsupported message type: " + msg.getClass().getName());
     }
 
     private void runOnLoop(Runnable task) {
@@ -418,11 +533,10 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
         }
     }
 
-    private void connectClient(ChannelPromise promise) throws Exception {
-        KwikQuicClientCodec codec = parent().pipeline().get(KwikQuicClientCodec.class);
-        if (codec == null) {
-            throw new IllegalStateException("no QUIC client codec in the pipeline of " + parent());
-        }
+    /**
+     * Called by the codec, when the connect went through the UDP channel's pipeline, as with quiche.
+     */
+    void connectClient(KwikQuicClientCodec codec) throws Exception {
         KwikQuicSslContext ssl = quicConfig.sslContext;
         List<String> protocols = ssl.applicationProtocols();
         if (protocols.isEmpty()) {
@@ -453,7 +567,10 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
             builder.maxOpenPeerInitiatedUnidirectionalStreams((int) Long.min(quicConfig.initialMaxStreamsUni, Integer.MAX_VALUE));
         }
         X509TrustManager trustManager = ssl.trustManager();
-        if (trustManager != null) {
+        if (trustManager instanceof X509ExtendedTrustManager) {
+            builder.customTrustManager(withEngine((X509ExtendedTrustManager) trustManager, sslEngine));
+        }
+        else if (trustManager != null) {
             builder.customTrustManager(trustManager);
         }
         // In Netty, checking the host name is the trust manager's job (through the SSLEngine's endpoint identification),
@@ -465,9 +582,11 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
         if (keyManager != null) {
             builder.clientKeyManager(keyManager);
         }
+        if (quicConfig.datagramRecvQueueLen > 0) {
+            builder.enableDatagramExtension();
+        }
         QuicClientConnection client = builder.build();
         attach(client, protocols.get(0));
-        connectPromise = promise;
         client.connectAsync().whenComplete((ok, failure) -> runOnLoop(() -> {
             ChannelPromise pending = connectPromise;
             if (pending == null) {
@@ -478,26 +597,89 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
                 state = State.ACTIVE;
                 sslEngine.handshakeFinished(client.getPeerCertificateChain(), applicationProtocol);
                 if (pending.trySuccess()) {
+                    fireDatagramExtensionEvent();
                     pipeline().fireChannelActive();
                     pipeline().fireUserEventTriggered(SslHandshakeCompletionEvent.SUCCESS);
+                    pipeline().fireUserEventTriggered(QuicStreamLimitChangedEvent.INSTANCE);
                 }
                 else {
                     unsafe().close(voidPromise());
                 }
             }
             else {
-                Throwable cause = failure != null? failure: new ClosedChannelException();
-                if (cause instanceof java.util.concurrent.CompletionException && cause.getCause() != null) {
-                    cause = cause.getCause();
-                }
-                pipeline().fireUserEventTriggered(new SslHandshakeCompletionEvent(cause));
-                pending.tryFailure(cause);
-                unsafe().close(voidPromise());
+                connectPromise = pending;
+                connectFailed(failure);
             }
         }));
     }
 
+    private void connectFailed(@Nullable Throwable failure) {
+        ChannelPromise pending = connectPromise;
+        if (pending == null) {
+            return;
+        }
+        connectPromise = null;
+        Throwable cause = failure != null? failure: new ClosedChannelException();
+        if (cause instanceof java.util.concurrent.CompletionException && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        if (cause instanceof java.net.SocketTimeoutException) {
+            cause = new ConnectTimeoutException("connection timed out: " + remoteSocketAddress);
+        }
+        else if (cause instanceof PeerClosedConnectionException) {
+            PeerClosedConnectionException peerClose = (PeerClosedConnectionException) cause;
+            QuicConnectionCloseEvent closeEvent = new QuicConnectionCloseEvent(peerClose.isApplicationError(),
+                    (int) peerClose.errorCode(), peerClose.reason().getBytes(StandardCharsets.UTF_8));
+            if (!closeEventFired) {
+                closeEventFired = true;
+                pipeline().fireUserEventTriggered(closeEvent);
+            }
+            cause = new QuicClosedChannelException(closeEvent).initCause(cause);
+        }
+        else if (cause instanceof java.net.ConnectException) {
+            cause = new QuicClosedChannelException(null).initCause(cause);
+        }
+        pipeline().fireUserEventTriggered(new SslHandshakeCompletionEvent(cause));
+        pending.tryFailure(cause);
+        unsafe().close(voidPromise());
+    }
+
+    /**
+     * kwik calls the plain {@link X509TrustManager} methods; an extended one gets the channel's engine, as with quiche.
+     */
+    private static X509TrustManager withEngine(X509ExtendedTrustManager tm, SSLEngine engine) {
+        return new X509TrustManager() {
+            @Override
+            public void checkClientTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+                tm.checkClientTrusted(chain, authType, engine);
+            }
+
+            @Override
+            public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+                tm.checkServerTrusted(chain, authType, engine);
+            }
+
+            @Override
+            public X509Certificate[] getAcceptedIssuers() {
+                return tm.getAcceptedIssuers();
+            }
+        };
+    }
+
     private final class QuicChannelUnsafe extends AbstractUnsafe {
+        @Override
+        public void close(ChannelPromise promise) {
+            QuicConnection conn = connection;
+            if (conn == null || state == State.CLOSED || !eventLoop().inEventLoop()) {
+                super.close(promise);
+                return;
+            }
+            // kwik writes the CONNECTION_CLOSE to the parent now; completing the close in a later task lets those
+            // writes go first, so a parent closed when this close completes still sends them
+            conn.close();
+            eventLoop().execute(() -> super.close(promise));
+        }
+
         @Override
         public void connect(SocketAddress remote, @Nullable SocketAddress local, ChannelPromise promise) {
             assert eventLoop().inEventLoop();
@@ -516,14 +698,17 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
                 promise.setFailure(new AlreadyConnectedException());
                 return;
             }
-            try {
-                connectClient(promise);
+            if (local instanceof QuicConnectionAddress) {
+                requestedConnectionAddress = (QuicConnectionAddress) local;
             }
-            catch (Exception e) {
-                promise.setFailure(e);
-                close(voidPromise());
-                return;
-            }
+            connectPromise = promise;
+            parent().connect(new KwikQuicChannelAddress(KwikQuicChannel.this)).addListener(f -> {
+                if (!f.isSuccess() && connectPromise == promise) {
+                    connectPromise = null;
+                    promise.tryFailure(f.cause());
+                    close(voidPromise());
+                }
+            });
             int connectTimeoutMillis = config.getConnectTimeoutMillis();
             if (connectTimeoutMillis > 0) {
                 // kwik times out too; this only makes the exception the one Netty users expect

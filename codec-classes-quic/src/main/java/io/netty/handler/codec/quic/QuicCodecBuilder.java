@@ -17,8 +17,6 @@ package io.netty.handler.codec.quic;
 
 import io.netty.channel.ChannelHandler;
 
-import org.jetbrains.annotations.Nullable;
-
 import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -54,9 +52,6 @@ public abstract class QuicCodecBuilder<B extends QuicCodecBuilder<B>> {
     private Integer initialCongestionWindowPackets;
     private int localConnIdLength;
     private Function<QuicChannel, ? extends QuicSslEngine> sslEngineProvider;
-    // kwik takes its TLS settings once, so it needs the context rather than an engine per channel
-    @Nullable
-    private QuicSslContext sslContext;
     private FlushStrategy flushStrategy = FlushStrategy.DEFAULT;
     private Integer recvQueueLen;
     private Integer sendQueueLen;
@@ -97,7 +92,6 @@ public abstract class QuicCodecBuilder<B extends QuicCodecBuilder<B>> {
         this.initialCongestionWindowPackets = builder.initialCongestionWindowPackets;
         this.localConnIdLength = builder.localConnIdLength;
         this.sslEngineProvider = builder.sslEngineProvider;
-        this.sslContext = builder.sslContext;
         this.flushStrategy = builder.flushStrategy;
         this.recvQueueLen = builder.recvQueueLen;
         this.sendQueueLen = builder.sendQueueLen;
@@ -434,9 +428,7 @@ public abstract class QuicCodecBuilder<B extends QuicCodecBuilder<B>> {
             throw new IllegalArgumentException("QuicSslContext.isServer() " + sslContext.isServer()
                     + " isn't supported by this builder");
         }
-        sslEngineProvider(q -> sslContext.newEngine(q.alloc()));
-        this.sslContext = sslContext;
-        return self();
+        return sslEngineProvider(q -> sslContext.newEngine(q.alloc()));
     }
 
     /**
@@ -447,7 +439,6 @@ public abstract class QuicCodecBuilder<B extends QuicCodecBuilder<B>> {
      * @return                      the instance itself.
      */
     public final B sslEngineProvider(Function<QuicChannel, ? extends QuicSslEngine> sslEngineProvider) {
-        this.sslContext = null;
         this.sslEngineProvider = sslEngineProvider;
         return self();
     }
@@ -491,14 +482,33 @@ public abstract class QuicCodecBuilder<B extends QuicCodecBuilder<B>> {
     }
 
     private KwikConfig createConfig() {
-        if (!(sslContext instanceof KwikQuicSslContext)) {
-            throw new UnsupportedOperationException(
-                    "kwik needs a QuicSslContext built with QuicSslContextBuilder; set it with sslContext(...)");
-        }
+        KwikQuicSslContext sslContext = sslContext(sslEngineProvider);
         return new KwikConfig(version, maxIdleTimeout, maxSendUdpPayloadSize, maxRecvUdpPayloadSize, initialMaxData,
                 initialMaxStreamDataBidiLocal, initialMaxStreamDataBidiRemote, initialMaxStreamDataUni,
                 initialMaxStreamsBidi, initialMaxStreamsUni, ackDelayExponent, maxAckDelay, disableActiveMigration,
-                activeConnectionIdLimit, statelessResetToken, (KwikQuicSslContext) sslContext);
+                activeConnectionIdLimit, statelessResetToken, sslContext,
+                sslEngineProvider, recvQueueLen == null? 0: recvQueueLen);
+    }
+
+    /**
+     * kwik takes its TLS settings once, when building the endpoint, rather than an engine per channel. So the provider
+     * is asked for an engine with a stand-in channel (that only offers {@link QuicChannel#alloc()}), and the engine
+     * tells which context made it. A provider that chooses a context per channel gets the one it gives first.
+     */
+    private static KwikQuicSslContext sslContext(Function<QuicChannel, ? extends QuicSslEngine> provider) {
+        QuicChannel standIn = (QuicChannel) java.lang.reflect.Proxy.newProxyInstance(QuicChannel.class.getClassLoader(),
+                new Class<?>[] { QuicChannel.class }, (proxy, method, args) -> {
+                    if (method.getName().equals("alloc")) {
+                        return io.netty.buffer.ByteBufAllocator.DEFAULT;
+                    }
+                    throw new UnsupportedOperationException(method.getName());
+                });
+        QuicSslEngine engine = provider.apply(standIn);
+        if (!(engine instanceof KwikQuicSslEngine)) {
+            throw new UnsupportedOperationException(
+                    "kwik needs QuicSslEngines from a QuicSslContext built with QuicSslContextBuilder");
+        }
+        return ((KwikQuicSslEngine) engine).context();
     }
 
     /**
