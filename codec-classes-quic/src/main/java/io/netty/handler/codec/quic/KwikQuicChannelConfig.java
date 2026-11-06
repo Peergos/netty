@@ -29,13 +29,13 @@ import java.util.Map;
 /**
  * Default {@link QuicChannelConfig} implementation.
  */
-final class QuicheQuicChannelConfig extends DefaultChannelConfig implements QuicChannelConfig {
+final class KwikQuicChannelConfig extends DefaultChannelConfig implements QuicChannelConfig {
 
     private volatile QLogConfiguration qLogConfiguration;
     private volatile SegmentedDatagramPacketAllocator segmentedDatagramPacketAllocator =
             SegmentedDatagramPacketAllocator.NONE;
 
-    QuicheQuicChannelConfig(Channel channel) {
+    KwikQuicChannelConfig(Channel channel) {
         super(channel);
     }
 

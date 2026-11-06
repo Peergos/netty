@@ -42,12 +42,7 @@ public final class Quic {
     static {
         Throwable cause = null;
 
-        try {
-            String version = Quiche.quiche_version();
-            assert version != null;
-        } catch (Throwable error) {
-            cause = error;
-        }
+        // kwik is pure Java, so it is available wherever this class loads
 
         UNAVAILABILITY_CAUSE = cause;
     }
@@ -65,7 +60,8 @@ public final class Quic {
      * @return          {@code true} if supported, {@code false} otherwise.
      */
     public static boolean isVersionSupported(int version) {
-        return isAvailable() && Quiche.quiche_version_is_supported(version);
+        // QUIC v1 and v2, as kwik supports
+        return version == 0x00000001 || version == 0x6b3343cf;
     }
 
     /**

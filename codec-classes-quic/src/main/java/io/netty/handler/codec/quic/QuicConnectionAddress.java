@@ -61,9 +61,9 @@ public final class QuicConnectionAddress extends SocketAddress {
 
     private QuicConnectionAddress(ByteBuffer connId, boolean validate) {
         Quic.ensureAvailability();
-        if (validate && connId.remaining() > Quiche.QUICHE_MAX_CONN_ID_LEN) {
+        if (validate && connId.remaining() > Quic.MAX_CONN_ID_LEN) {
             throw new IllegalArgumentException("Connection ID can only be of max length "
-                    + Quiche.QUICHE_MAX_CONN_ID_LEN);
+                    + Quic.MAX_CONN_ID_LEN);
         }
         if (connId == null) {
             this.connId = null;
@@ -130,6 +130,6 @@ public final class QuicConnectionAddress extends SocketAddress {
      * @return the generated address.
      */
     public static QuicConnectionAddress random() {
-        return random(Quiche.QUICHE_MAX_CONN_ID_LEN);
+        return random(Quic.MAX_CONN_ID_LEN);
     }
 }

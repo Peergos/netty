@@ -43,10 +43,10 @@ public final class QuicClientCodecBuilder extends QuicCodecBuilder<QuicClientCod
     }
 
     @Override
-    ChannelHandler build(QuicheConfig config,
+    ChannelHandler build(KwikConfig config,
                                    Function<QuicChannel, ? extends QuicSslEngine> sslEngineProvider,
                                    Executor sslTaskExecutor,
                                    int localConnIdLength, FlushStrategy flushStrategy) {
-        return new QuicheQuicClientCodec(config, sslEngineProvider, sslTaskExecutor, localConnIdLength, flushStrategy);
+        return new KwikQuicClientCodec(config, localConnIdLength);
     }
 }

@@ -196,7 +196,7 @@ public final class QuicServerCodecBuilder extends QuicCodecBuilder<QuicServerCod
     }
 
     @Override
-    ChannelHandler build(QuicheConfig config,
+    ChannelHandler build(KwikConfig config,
                                    Function<QuicChannel, ? extends QuicSslEngine> sslEngineProvider,
                                    Executor sslTaskExecutor,
                                    int localConnIdLength, FlushStrategy flushStrategy) {
@@ -205,18 +205,8 @@ public final class QuicServerCodecBuilder extends QuicCodecBuilder<QuicServerCod
         if (tokenHandler == null) {
             tokenHandler = NoQuicTokenHandler.INSTANCE;
         }
-        QuicConnectionIdGenerator generator = connectionIdAddressGenerator;
-        if (generator == null) {
-            generator = QuicConnectionIdGenerator.signGenerator();
-        }
-        QuicResetTokenGenerator resetTokenGenerator = this.resetTokenGenerator;
-        if (resetTokenGenerator == null) {
-            resetTokenGenerator = QuicResetTokenGenerator.signGenerator();
-        }
-        ChannelHandler handler = this.handler;
-        ChannelHandler streamHandler = this.streamHandler;
-        return new QuicheQuicServerCodec(config, localConnIdLength, tokenHandler, generator, resetTokenGenerator,
-                flushStrategy, sslEngineProvider, sslTaskExecutor, handler,
+        // The connection id and reset token generators are not used: kwik generates its own
+        return new KwikQuicServerCodec(config, localConnIdLength, tokenHandler, handler,
                 Quic.toOptionsArray(options), Quic.toAttributesArray(attrs),
                 streamHandler, Quic.toOptionsArray(streamOptions), Quic.toAttributesArray(streamAttrs));
     }

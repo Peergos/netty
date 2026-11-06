@@ -180,7 +180,7 @@ public final class QuicSslContextBuilder {
     private QuicSslContextBuilder(boolean forServer) {
         this.forServer = forServer;
         if (!forServer) {
-             this.endpointIdentificationAlgorithm = QuicheQuicSslContext.defaultEndpointVerificationAlgorithm;
+             this.endpointIdentificationAlgorithm = KwikQuicSslContext.DEFAULT_ENDPOINT_IDENTIFICATION_ALGORITHM;
         }
     }
 
@@ -237,7 +237,8 @@ public final class QuicSslContextBuilder {
      *     NSS Key Log Format</a>. This is intended for debugging use with tools like Wireshark.
      */
     public QuicSslContextBuilder keylog(boolean enabled) {
-        keylog(enabled ? BoringSSLLoggingKeylog.INSTANCE : null);
+        // Not supported by the kwik based implementation
+        keylog(null);
         return this;
     }
 
@@ -261,7 +262,7 @@ public final class QuicSslContextBuilder {
      */
     public QuicSslContextBuilder trustManager(@Nullable File trustCertCollectionFile) {
         try {
-            return trustManager(QuicheQuicSslContext.toX509Certificates0(trustCertCollectionFile));
+            return trustManager(KwikQuicSslContext.toX509Certificates0(trustCertCollectionFile));
         } catch (Exception e) {
             throw new IllegalArgumentException("File does not contain valid certificates: "
                     + trustCertCollectionFile, e);
@@ -276,7 +277,7 @@ public final class QuicSslContextBuilder {
      */
     public QuicSslContextBuilder trustManager(X509Certificate @Nullable ... trustCertCollection) {
         try {
-            return trustManager(QuicheQuicSslContext.buildTrustManagerFactory0(trustCertCollection));
+            return trustManager(KwikQuicSslContext.buildTrustManagerFactory0(trustCertCollection));
         } catch (Exception e) {
             throw new IllegalArgumentException(e);
         }
@@ -318,12 +319,12 @@ public final class QuicSslContextBuilder {
         X509Certificate[] keyCertChain;
         PrivateKey key;
         try {
-            keyCertChain = QuicheQuicSslContext.toX509Certificates0(keyCertChainFile);
+            keyCertChain = KwikQuicSslContext.toX509Certificates0(keyCertChainFile);
         } catch (Exception e) {
             throw new IllegalArgumentException("File does not contain valid certificates: " + keyCertChainFile, e);
         }
         try {
-            key = QuicheQuicSslContext.toPrivateKey0(keyFile, keyPassword);
+            key = KwikQuicSslContext.toPrivateKey0(keyFile, keyPassword);
         } catch (Exception e) {
             throw new IllegalArgumentException("File does not contain valid private key: " + keyFile, e);
         }
@@ -434,15 +435,10 @@ public final class QuicSslContextBuilder {
      *
      */
     public QuicSslContext build() {
-        if (forServer) {
-            return new QuicheQuicSslContext(true, sessionTimeout, sessionCacheSize, clientAuth, trustManagerFactory,
-                    keyManagerFactory, keyPassword, mapping, earlyData, keylog,
-                    applicationProtocols, null, toArray(options.entrySet(), EMPTY_ENTRIES));
-        } else {
-            return new QuicheQuicSslContext(false, sessionTimeout, sessionCacheSize, clientAuth, trustManagerFactory,
-                    keyManagerFactory, keyPassword, mapping, earlyData, keylog,
-                    applicationProtocols, endpointIdentificationAlgorithm, toArray(options.entrySet(), EMPTY_ENTRIES));
-        }
+        // Options (BoringSSLContextOption), early data, keylog and SNI mapping are not supported by the kwik based
+        // implementation and are ignored
+        return new KwikQuicSslContext(forServer, keyManagerFactory, trustManagerFactory, clientAuth, applicationProtocols,
+                forServer? null: endpointIdentificationAlgorithm, sessionCacheSize, sessionTimeout);
     }
 
     private static <T> T[] toArray(Iterable<? extends T> iterable, T[] prototype) {

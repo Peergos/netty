@@ -46,7 +46,7 @@ final class HmacSignQuicConnectionIdGenerator implements QuicConnectionIdGenerat
 
     @Override
     public int maxConnectionIdLength() {
-        return Quiche.QUICHE_MAX_CONN_ID_LEN;
+        return Quic.MAX_CONN_ID_LEN;
     }
 
     @Override

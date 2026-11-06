@@ -20,23 +20,24 @@ import java.util.function.BiConsumer;
 /**
  * Allows to customize private key signing / decrypt (when using RSA).
  */
+// The TLS SignatureScheme code points, as BoringSSL uses for SSL_SIGN_* (0xff01 is BoringSSL's own)
 interface BoringSSLPrivateKeyMethod {
-    int SSL_SIGN_RSA_PKCS1_SHA1 = BoringSSLNativeStaticallyReferencedJniMethods.ssl_sign_rsa_pkcs_sha1();
-    int SSL_SIGN_RSA_PKCS1_SHA256 = BoringSSLNativeStaticallyReferencedJniMethods.ssl_sign_rsa_pkcs_sha256();
-    int SSL_SIGN_RSA_PKCS1_SHA384 = BoringSSLNativeStaticallyReferencedJniMethods.ssl_sign_rsa_pkcs_sha384();
-    int SSL_SIGN_RSA_PKCS1_SHA512 = BoringSSLNativeStaticallyReferencedJniMethods.ssl_sign_rsa_pkcs_sha512();
-    int SSL_SIGN_ECDSA_SHA1 = BoringSSLNativeStaticallyReferencedJniMethods.ssl_sign_ecdsa_pkcs_sha1();
+    int SSL_SIGN_RSA_PKCS1_SHA1 = 0x0201;
+    int SSL_SIGN_RSA_PKCS1_SHA256 = 0x0401;
+    int SSL_SIGN_RSA_PKCS1_SHA384 = 0x0501;
+    int SSL_SIGN_RSA_PKCS1_SHA512 = 0x0601;
+    int SSL_SIGN_ECDSA_SHA1 = 0x0203;
     int SSL_SIGN_ECDSA_SECP256R1_SHA256 =
-            BoringSSLNativeStaticallyReferencedJniMethods.ssl_sign_ecdsa_secp256r1_sha256();
+            0x0403;
     int SSL_SIGN_ECDSA_SECP384R1_SHA384 =
-            BoringSSLNativeStaticallyReferencedJniMethods.ssl_sign_ecdsa_secp384r1_sha384();
+            0x0503;
     int SSL_SIGN_ECDSA_SECP521R1_SHA512 =
-            BoringSSLNativeStaticallyReferencedJniMethods.ssl_sign_ecdsa_secp521r1_sha512();
-    int SSL_SIGN_RSA_PSS_RSAE_SHA256 = BoringSSLNativeStaticallyReferencedJniMethods.ssl_sign_rsa_pss_rsae_sha256();
-    int SSL_SIGN_RSA_PSS_RSAE_SHA384 = BoringSSLNativeStaticallyReferencedJniMethods.ssl_sign_rsa_pss_rsae_sha384();
-    int SSL_SIGN_RSA_PSS_RSAE_SHA512 = BoringSSLNativeStaticallyReferencedJniMethods.ssl_sign_rsa_pss_rsae_sha512();
-    int SSL_SIGN_ED25519 = BoringSSLNativeStaticallyReferencedJniMethods.ssl_sign_ed25519();
-    int SSL_SIGN_RSA_PKCS1_MD5_SHA1 = BoringSSLNativeStaticallyReferencedJniMethods.ssl_sign_rsa_pkcs1_md5_sha1();
+            0x0603;
+    int SSL_SIGN_RSA_PSS_RSAE_SHA256 = 0x0804;
+    int SSL_SIGN_RSA_PSS_RSAE_SHA384 = 0x0805;
+    int SSL_SIGN_RSA_PSS_RSAE_SHA512 = 0x0806;
+    int SSL_SIGN_ED25519 = 0x0807;
+    int SSL_SIGN_RSA_PKCS1_MD5_SHA1 = 0xff01;
 
     /**
      * Sign the input with given EC key and returns the signed bytes.

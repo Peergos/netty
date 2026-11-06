@@ -17,6 +17,8 @@ package io.netty.handler.codec.quic;
 
 import io.netty.channel.ChannelHandler;
 
+import org.jetbrains.annotations.Nullable;
+
 import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -52,6 +54,9 @@ public abstract class QuicCodecBuilder<B extends QuicCodecBuilder<B>> {
     private Integer initialCongestionWindowPackets;
     private int localConnIdLength;
     private Function<QuicChannel, ? extends QuicSslEngine> sslEngineProvider;
+    // kwik takes its TLS settings once, so it needs the context rather than an engine per channel
+    @Nullable
+    private QuicSslContext sslContext;
     private FlushStrategy flushStrategy = FlushStrategy.DEFAULT;
     private Integer recvQueueLen;
     private Integer sendQueueLen;
@@ -65,8 +70,8 @@ public abstract class QuicCodecBuilder<B extends QuicCodecBuilder<B>> {
 
     QuicCodecBuilder(boolean server) {
         Quic.ensureAvailability();
-        this.version = Quiche.QUICHE_PROTOCOL_VERSION;
-        this.localConnIdLength = Quiche.QUICHE_MAX_CONN_ID_LEN;
+        this.version = 1;
+        this.localConnIdLength = Quic.MAX_CONN_ID_LEN;
         this.server = server;
     }
 
@@ -92,6 +97,7 @@ public abstract class QuicCodecBuilder<B extends QuicCodecBuilder<B>> {
         this.initialCongestionWindowPackets = builder.initialCongestionWindowPackets;
         this.localConnIdLength = builder.localConnIdLength;
         this.sslEngineProvider = builder.sslEngineProvider;
+        this.sslContext = builder.sslContext;
         this.flushStrategy = builder.flushStrategy;
         this.recvQueueLen = builder.recvQueueLen;
         this.sendQueueLen = builder.sendQueueLen;
@@ -382,7 +388,7 @@ public abstract class QuicCodecBuilder<B extends QuicCodecBuilder<B>> {
      * @return        the instance itself.
      */
     public final B localConnectionIdLength(int value) {
-        this.localConnIdLength = checkInRange(value, 0, Quiche.QUICHE_MAX_CONN_ID_LEN,  "value");
+        this.localConnIdLength = checkInRange(value, 0, Quic.MAX_CONN_ID_LEN,  "value");
         return self();
     }
 
@@ -428,7 +434,9 @@ public abstract class QuicCodecBuilder<B extends QuicCodecBuilder<B>> {
             throw new IllegalArgumentException("QuicSslContext.isServer() " + sslContext.isServer()
                     + " isn't supported by this builder");
         }
-        return sslEngineProvider(q -> sslContext.newEngine(q.alloc()));
+        sslEngineProvider(q -> sslContext.newEngine(q.alloc()));
+        this.sslContext = sslContext;
+        return self();
     }
 
     /**
@@ -439,6 +447,7 @@ public abstract class QuicCodecBuilder<B extends QuicCodecBuilder<B>> {
      * @return                      the instance itself.
      */
     public final B sslEngineProvider(Function<QuicChannel, ? extends QuicSslEngine> sslEngineProvider) {
+        this.sslContext = null;
         this.sslEngineProvider = sslEngineProvider;
         return self();
     }
@@ -481,14 +490,15 @@ public abstract class QuicCodecBuilder<B extends QuicCodecBuilder<B>> {
         return self();
     }
 
-    private QuicheConfig createConfig() {
-        return new QuicheConfig(version, grease,
-                maxIdleTimeout, maxSendUdpPayloadSize, maxRecvUdpPayloadSize, initialMaxData,
-                initialMaxStreamDataBidiLocal, initialMaxStreamDataBidiRemote,
-                initialMaxStreamDataUni, initialMaxStreamsBidi, initialMaxStreamsUni,
-                ackDelayExponent, maxAckDelay, disableActiveMigration, enableHystart, discoverPmtu,
-                congestionControlAlgorithm, initialCongestionWindowPackets, recvQueueLen, sendQueueLen,
-                activeConnectionIdLimit, statelessResetToken);
+    private KwikConfig createConfig() {
+        if (!(sslContext instanceof KwikQuicSslContext)) {
+            throw new UnsupportedOperationException(
+                    "kwik needs a QuicSslContext built with QuicSslContextBuilder; set it with sslContext(...)");
+        }
+        return new KwikConfig(version, maxIdleTimeout, maxSendUdpPayloadSize, maxRecvUdpPayloadSize, initialMaxData,
+                initialMaxStreamDataBidiLocal, initialMaxStreamDataBidiRemote, initialMaxStreamDataUni,
+                initialMaxStreamsBidi, initialMaxStreamsUni, ackDelayExponent, maxAckDelay, disableActiveMigration,
+                activeConnectionIdLimit, statelessResetToken, (KwikQuicSslContext) sslContext);
     }
 
     /**
@@ -508,13 +518,7 @@ public abstract class QuicCodecBuilder<B extends QuicCodecBuilder<B>> {
      */
     public final ChannelHandler build() {
         validate();
-        QuicheConfig config = createConfig();
-        try {
-            return build(config, sslEngineProvider, sslTaskExecutor, localConnIdLength, flushStrategy);
-        } catch (Throwable cause) {
-            config.free();
-            throw cause;
-        }
+        return build(createConfig(), sslEngineProvider, sslTaskExecutor, localConnIdLength, flushStrategy);
     }
 
     /**
@@ -527,14 +531,14 @@ public abstract class QuicCodecBuilder<B extends QuicCodecBuilder<B>> {
     /**
      * Builds the QUIC codec.
      *
-     * @param config                the {@link QuicheConfig} that should be used.
+     * @param config                the {@link KwikConfig} that should be used.
      * @param sslContextProvider    the context provider
      * @param sslTaskExecutor       the {@link Executor} to use.
      * @param localConnIdLength     the local connection id length.
      * @param flushStrategy         the {@link FlushStrategy}  that should be used.
      * @return                      the {@link ChannelHandler} which acts as codec.
      */
-    abstract ChannelHandler build(QuicheConfig config,
+    abstract ChannelHandler build(KwikConfig config,
                                             Function<QuicChannel, ? extends QuicSslEngine> sslContextProvider,
                                             Executor sslTaskExecutor,
                                             int localConnIdLength, FlushStrategy flushStrategy);

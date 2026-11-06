@@ -15,21 +15,28 @@
  */
 package io.netty.handler.codec.quic;
 
-import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.SystemPropertyUtil;
+import tech.kwik.core.log.Logger;
+import tech.kwik.core.log.NullLogger;
+import tech.kwik.core.log.SysOutLogger;
 
 /**
- * Delegates QUICHE logging to {@link InternalLogger}.
+ * kwik's own logging, off unless system property {@code io.netty.quic.kwik.log} is {@code true}; for diagnosing.
  */
-final class QuicheLogger {
-    private final InternalLogger logger;
+final class KwikLogging {
 
-    QuicheLogger(InternalLogger logger) {
-        this.logger = logger;
+    private static final boolean ENABLED = SystemPropertyUtil.getBoolean("io.netty.quic.kwik.log", false);
+
+    private KwikLogging() {
     }
 
-    // Called from JNI.
-    @SuppressWarnings("unused")
-    void log(String msg) {
-        logger.trace(msg);
+    static Logger logger() {
+        if (!ENABLED) {
+            return new NullLogger();
+        }
+        SysOutLogger log = new SysOutLogger();
+        log.logWarning(true);
+        log.logInfo(true);
+        return log;
     }
 }

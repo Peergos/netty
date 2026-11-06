@@ -252,7 +252,12 @@ public final class QuicChannelBootstrap {
 
         final QuicConnectionAddress localaddress = localAddress;
         final QuicConnectionAddress remoteaddress = remoteAddress;
-        QuicChannel channel = QuicheQuicChannel.forClient(parent, (InetSocketAddress)  local,
+        KwikQuicClientCodec codec = parent.pipeline().get(KwikQuicClientCodec.class);
+        if (codec == null) {
+            promise.setFailure(new IllegalStateException("no QUIC client codec in the pipeline of " + parent));
+            return promise;
+        }
+        QuicChannel channel = KwikQuicChannel.forClient(parent, codec.config(), (InetSocketAddress) local,
                 (InetSocketAddress) remote,
                 streamHandler, Quic.toOptionsArray(streamOptions), Quic.toAttributesArray(streamAttrs));
 
