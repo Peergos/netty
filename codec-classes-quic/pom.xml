@@ -34,7 +34,7 @@
     <maven.compiler.target>11</maven.compiler.target>
     <maven.compiler.release>11</maven.compiler.release>
     <!-- The Peergos kwik and agent15 forks, from JitPack -->
-    <kwik.version>54adfc1f63</kwik.version>
+    <kwik.version>54adfc1f29</kwik.version>
     <agent15.version>97a891be80</agent15.version>
     <!-- Literal, not ${project.version}: JitPack publishes this module alone, with its commit as the version, and the
          other Netty modules come from Maven Central -->
