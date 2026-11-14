@@ -613,6 +613,18 @@ final class KwikQuicChannel extends AbstractChannel implements QuicChannel {
         }));
     }
 
+    /**
+     * Called by the codec (on the event loop) when the UDP channel failed to send a datagram. While connecting,
+     * that fails the connect now rather than at its timeout; an established connection is left to its idle timeout.
+     */
+    void sendFailed(InetSocketAddress destination, Throwable cause) {
+        if (connectPromise == null || !destination.equals(remoteSocketAddress)) {
+            return;
+        }
+        // A later task, as the failed send may be on kwik's stack
+        eventLoop().execute(() -> connectFailed(cause));
+    }
+
     private void connectFailed(@Nullable Throwable failure) {
         ChannelPromise pending = connectPromise;
         if (pending == null) {

@@ -16,13 +16,16 @@
 package io.netty.handler.codec.quic;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.socket.DatagramPacket;
+import org.jetbrains.annotations.Nullable;
 import tech.kwik.core.socket.DatagramSender;
 
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.time.Instant;
+import java.util.function.BiConsumer;
 
 /**
  * Sends kwik's datagrams through the UDP channel the codec is in.
@@ -30,9 +33,18 @@ import java.time.Instant;
 final class KwikDatagramSender implements DatagramSender {
 
     private final ChannelHandlerContext ctx;
+    @Nullable private final BiConsumer<InetSocketAddress, Throwable> sendFailed;
 
     KwikDatagramSender(ChannelHandlerContext ctx) {
+        this(ctx, null);
+    }
+
+    /**
+     * @param sendFailed called on the event loop with the destination of each datagram the channel failed to send
+     */
+    KwikDatagramSender(ChannelHandlerContext ctx, @Nullable BiConsumer<InetSocketAddress, Throwable> sendFailed) {
         this.ctx = ctx;
+        this.sendFailed = sendFailed;
     }
 
     @Override
@@ -42,7 +54,16 @@ final class KwikDatagramSender implements DatagramSender {
         // kwik reuses its buffer once this returns
         ByteBuf copy = ctx.alloc().directBuffer(source.remaining());
         copy.writeBytes(source);
-        ctx.writeAndFlush(new DatagramPacket(copy, destination), ctx.voidPromise());
+        // Not a void promise, which would fire a failed send (e.g. no route to the destination) through the pipeline
+        // as an exception, once per datagram
+        ChannelFuture sent = ctx.writeAndFlush(new DatagramPacket(copy, destination));
+        if (sendFailed != null) {
+            sent.addListener(f -> {
+                if (!f.isSuccess()) {
+                    sendFailed.accept(destination, f.cause());
+                }
+            });
+        }
         return Instant.now();
     }
 
